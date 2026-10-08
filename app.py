@@ -22,6 +22,7 @@ HOW TO EDIT CARS: scroll to the CARS list below. One block = one car. Up to 50 c
 After changing the list, restart the server (Ctrl+C, then python app.py).
 """
 import os
+import re
 import sys
 import time
 from collections import defaultdict, deque
@@ -52,12 +53,17 @@ except ImportError:  # only needed if index.html is hosted on a different domain
 # featured      : True to show a "Featured" badge on the website (optional)
 # note          : optional extra info (owner, colour, etc.). Use "" if not needed.
 # image         : optional photo URL for the website card (if missing, a sample photo is used)
+# images        : optional list of photo URLs for the car page gallery, e.g. ["https://.../1.jpg", "https://.../2.jpg"]
+# owner         : optional, e.g. "1st", "2nd"            (car page)
+# reg_year      : optional registration year, e.g. 2021   (car page)
+# color         : optional, e.g. "White"                  (car page)
+# highlights    : optional list of short points shown under "Special about this car" (car page)
 # NOTE: these are SAMPLE cars. Replace them with your real stock.
 CARS = [
-    {"type": "Used", "brand": "BMW", "model": "5 Series", "variant": "530d", "body": "Luxury", "year": 2021, "km": 42000, "city": "Patna", "state": "BR", "price": 3850000, "fuel": "Diesel", "transmission": "Automatic", "status": "Available", "featured": True, "note": "1st owner, white"},
-    {"type": "Used", "brand": "Toyota", "model": "Fortuner", "variant": "4x2 AT", "body": "SUV", "year": 2022, "km": 35000, "city": "Gaya", "state": "BR", "price": 4250000, "fuel": "Diesel", "transmission": "Automatic", "status": "Available", "featured": True, "note": "1st owner"},
+    {"type": "Used", "brand": "BMW", "model": "5 Series", "variant": "530d", "body": "Luxury", "year": 2021, "km": 42000, "city": "Patna", "state": "BR", "price": 3850000, "fuel": "Diesel", "transmission": "Automatic", "status": "Available", "featured": True, "note": "1st owner, white", "owner": "1st", "reg_year": 2021, "color": "White", "highlights": ["Single owner", "Premium cabin and comfort", "Sample highlight - replace with real points"]},
+    {"type": "Used", "brand": "Toyota", "model": "Fortuner", "variant": "4x2 AT", "body": "SUV", "year": 2022, "km": 35000, "city": "Gaya", "state": "BR", "price": 4250000, "fuel": "Diesel", "transmission": "Automatic", "status": "Available", "featured": True, "note": "1st owner", "owner": "1st", "reg_year": 2022, "color": "Silver", "highlights": ["Single owner", "Spacious 7-seat SUV", "Sample highlight - replace with real points"]},
     {"type": "Used", "brand": "Hyundai", "model": "Creta", "variant": "SX", "body": "SUV", "year": 2021, "km": 58000, "city": "Kolkata", "state": "WB", "price": 1425000, "fuel": "Diesel", "transmission": "Manual", "status": "Available", "note": ""},
-    {"type": "Used", "brand": "Tata", "model": "Nexon", "variant": "XZ+", "body": "SUV", "year": 2022, "km": 28000, "city": "Gaya", "state": "BR", "price": 975000, "fuel": "Petrol", "transmission": "Automatic", "status": "Available", "note": ""},
+    {"type": "Used", "brand": "Tata", "model": "Nexon", "variant": "XZ+", "body": "SUV", "year": 2022, "km": 28000, "city": "Gaya", "state": "BR", "price": 975000, "fuel": "Petrol", "transmission": "Automatic", "status": "Available", "note": "", "owner": "1st", "reg_year": 2022, "color": "Red"},
     {"type": "Used", "brand": "Maruti Suzuki", "model": "Ertiga", "variant": "VXI CNG", "body": "MPV", "year": 2020, "km": 61000, "city": "Gaya", "state": "BR", "price": 875000, "fuel": "CNG", "transmission": "Manual", "status": "Available", "note": "7-seater"},
     {"type": "Used", "brand": "Maruti Suzuki", "model": "Swift", "variant": "ZXI", "body": "Hatchback", "year": 2019, "km": 50000, "city": "Ranchi", "state": "JH", "price": 495000, "fuel": "Petrol", "transmission": "Manual", "status": "Booked", "note": ""},
     {"type": "Used", "brand": "Honda", "model": "City", "variant": "VX", "body": "Sedan", "year": 2020, "km": 45000, "city": "Patna", "state": "BR", "price": 925000, "fuel": "Petrol", "transmission": "Automatic", "status": "Available", "note": ""},
@@ -81,6 +87,14 @@ BUSINESS = {
     "phones": ["+91-7004779667", "+91-8804305744"],
     "whatsapp": "https://wa.me/917004779667",
     "services": ["Buy new and pre-owned cars", "Sell your car", "Exchange your car", "Finance assistance"],
+}
+
+# Settings for the EMI calculator on the car page (all values are editable)
+EMI_SETTINGS = {
+    "interest": 9.5,        # default yearly interest rate in % (indicative only - the bank decides the real rate)
+    "max_loan_pct": 80,     # maximum loan as % of the car price (so minimum down payment = 20%)
+    "default_tenure": 5,    # default loan tenure in years
+    "max_tenure": 7,        # longest tenure in years shown on the slider
 }
 
 # Shown whenever the question is not related to Drive Cars 24/7
@@ -165,6 +179,20 @@ def validate_cars(cars=None):
     return problems
 
 
+def _slugify(text):
+    return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
+
+
+def car_slugs():
+    """One unique, stable URL id per car (same order as CARS), e.g. '2021-bmw-5-series-530d'."""
+    seen, out = {}, []
+    for c in CARS[:MAX_CARS]:
+        base = _slugify(f"{c.get('year', '')} {c.get('brand', '')} {c.get('model', '')} {c.get('variant', '')}") or "car"
+        seen[base] = seen.get(base, 0) + 1
+        out.append(base if seen[base] == 1 else f"{base}-{seen[base]}")
+    return out
+
+
 def available_cars():
     return [c for c in CARS[:MAX_CARS] if c.get("status") == "Available"]
 
@@ -184,6 +212,10 @@ def inventory_text():
             line += f" | Driven: {format_inr(c['km'])[1:]} km"
         if c.get("city"):
             line += f" | Located in: {c['city']}"
+        if c.get("color"):
+            line += f" | Colour: {c['color']}"
+        if c.get("owner"):
+            line += f" | Owner: {c['owner']}"
         if c.get("note"):
             line += f" | Note: {c['note']}"
         lines.append(line)
@@ -287,6 +319,12 @@ def home_html():
     return send_from_directory(BASE_DIR, "index.html")
 
 
+@app.route("/car")
+@app.route("/car.html")
+def car_page():
+    return send_from_directory(BASE_DIR, "car.html")
+
+
 @app.route("/cars")
 @app.route("/cars.html")
 def cars_page():
@@ -302,11 +340,19 @@ def health():
 
 @app.route("/api/cars")
 def api_cars():
-    """Car list for the website's 'All Cars' section (Sold cars are hidden)."""
+    """Car list for the website pages (Sold cars are hidden)."""
     keys = ("type", "brand", "model", "variant", "body", "year", "km", "city", "state", "price",
-            "fuel", "transmission", "status", "featured", "note", "image", "images")
-    cars = [{k: c.get(k) for k in keys} for c in CARS[:MAX_CARS] if c.get("status") != "Sold"]
-    return jsonify({"cars": cars})
+            "fuel", "transmission", "status", "featured", "note", "image", "images",
+            "owner", "reg_year", "color", "highlights")
+    cars = []
+    for car, slug in zip(CARS[:MAX_CARS], car_slugs()):
+        if car.get("status") == "Sold":
+            continue
+        item = {k: car.get(k) for k in keys}
+        item["slug"] = slug
+        cars.append(item)
+    return jsonify({"cars": cars, "emi": EMI_SETTINGS,
+                    "business": {"name": BUSINESS["name"], "phones": BUSINESS["phones"], "whatsapp": BUSINESS["whatsapp"]}})
 
 
 @app.route("/api/chat", methods=["POST"])

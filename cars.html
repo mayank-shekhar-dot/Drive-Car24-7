@@ -180,7 +180,10 @@ dialog{width:min(900px,calc(100% - 28px));max-height:min(88vh,850px);padding:0;b
   /* ---------- All Cars browser (data comes from app.py -> /api/cars) ---------- */
   // Keep '' when app.py serves this page. If index.html is hosted elsewhere, put your backend URL,
   // e.g. 'https://your-backend.onrender.com'  (the AI chat uses the same value)
-  const API_BASE='';
+  const BACKEND_URL='https://drive-car24-7.onrender.com'; // your Render service (change here if the Render link changes)
+  // The AI answers and the car list come from this Render backend on EVERY domain (.com, www, .onrender.com).
+  // Only when you test on your own computer (localhost) it uses your local app.py instead.
+  const API_BASE=/^(localhost|127\.0\.0\.1)$/.test(location.hostname)?'':BACKEND_URL;
   function initAllCars(){
     const $=id=>document.getElementById(id);
     const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

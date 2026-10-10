@@ -146,7 +146,10 @@ dialog{width:min(900px,calc(100% - 28px));max-height:min(88vh,850px);padding:0;b
   /* ---------- All Cars browser (data comes from app.py -> /api/cars) ---------- */
   // Keep '' when app.py serves this page. If index.html is hosted elsewhere, put your backend URL,
   // e.g. 'https://your-backend.onrender.com'  (the AI chat uses the same value)
-  const API_BASE='';
+  const BACKEND_URL='https://drive-car24-7.onrender.com'; // your Render service (change here if the Render link changes)
+  // The AI answers and the car list come from this Render backend on EVERY domain (.com, www, .onrender.com).
+  // Only when you test on your own computer (localhost) it uses your local app.py instead.
+  const API_BASE=/^(localhost|127\.0\.0\.1)$/.test(location.hostname)?'':BACKEND_URL;
   /* Trust section: photos change automatically */
   document.querySelectorAll('.trust-card').forEach((card,ci)=>{const slides=card.querySelectorAll('img.slide');if(slides.length<2||(window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches))return;let i=0;const next=()=>{slides[i].classList.remove('active');i=(i+1)%slides.length;slides[i].classList.add('active')};setTimeout(()=>setInterval(next,5000),ci*2500)});
 
@@ -155,12 +158,14 @@ dialog{width:min(900px,calc(100% - 28px));max-height:min(88vh,850px);padding:0;b
   const AI_ENDPOINT=API_BASE+'/api/chat';
   const fab=document.getElementById('ai-fab'),panel=document.getElementById('ai-panel'),log=document.getElementById('ai-log'),form=document.getElementById('ai-form'),input=document.getElementById('ai-input'),sendBtn=document.getElementById('ai-send'),chips=document.getElementById('ai-chips');
   const history=[];let welcomed=false,busy=false;
+  // debug mode: automatic on localhost, or open the site with ?debug=1 to see the real error inside the chat
+  const dbg=/^(localhost|127\.0\.0\.1)$/.test(location.hostname)||/[?&]debug=1/.test(location.search);
   function addMsg(role,text){const d=document.createElement('div');d.className='ai-msg '+role;d.textContent=text;log.appendChild(d);log.scrollTop=log.scrollHeight;return d}
   function setTyping(on){let t=document.getElementById('ai-typing');if(on&&!t){t=document.createElement('div');t.id='ai-typing';t.className='ai-typing';t.innerHTML='<i></i><i></i><i></i>';log.appendChild(t);log.scrollTop=log.scrollHeight}else if(!on&&t){t.remove()}}
   function toggleAI(open){const isOpen=open===undefined?!panel.classList.contains('open'):open;panel.classList.toggle('open',isOpen);fab.classList.toggle('open',isOpen);fab.setAttribute('aria-expanded',String(isOpen));fab.setAttribute('aria-label',isOpen?'Close AI assistant':'Open AI assistant');if(isOpen){if(!welcomed){welcomed=true;addMsg('bot','Hello! 👋 I am the Drive Cars 24/7 assistant. I can help you with buying, selling, exchanging a car or finance assistance. How can I help you today?')}setTimeout(()=>input.focus(),260)}}
   async function sendMessage(text){text=text.trim();if(!text||busy)return;busy=true;sendBtn.disabled=true;chips.style.display='none';addMsg('user',text);input.value='';setTyping(true);
-    try{const res=await fetch(AI_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text,history:history.slice(-10)})});const data=await res.json().catch(()=>({}));if(!res.ok||!data.reply)throw new Error(data.error||'Request failed');setTyping(false);addMsg('bot',data.reply);history.push({role:'user',text:text},{role:'model',text:data.reply})}
-    catch(err){setTyping(false);addMsg('bot','Sorry, I could not reach the assistant right now. Please call +91-7004779667 or message us on WhatsApp.')}
+    try{const res=await fetch(AI_ENDPOINT+(dbg?'?debug=1':''),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool:'chat_general',message:text,history:history.slice(-10)})});const data=await res.json().catch(()=>({}));const answer=data.reply||data.content;if(!res.ok||!answer){const e=new Error(data.error||data.message||('Request failed (HTTP '+res.status+')'));e.detail=data.detail;throw e}setTyping(false);addMsg('bot',answer);history.push({role:'user',text:text},{role:'model',text:answer})}
+    catch(err){setTyping(false);addMsg('bot','Sorry, I could not reach the assistant right now. Please call +91-7004779667 or message us on WhatsApp.'+(dbg?'\n\n[Developer info - debug mode]\n'+(err.detail||err.message||'No details (is app.py running?)'):''))}
     finally{busy=false;sendBtn.disabled=false;input.focus()}}
   fab.addEventListener('click',()=>toggleAI());document.getElementById('ai-close').addEventListener('click',()=>{toggleAI(false);fab.focus()});
   form.addEventListener('submit',e=>{e.preventDefault();sendMessage(input.value)});

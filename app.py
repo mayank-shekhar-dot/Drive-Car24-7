@@ -147,6 +147,7 @@ app = Flask(__name__)
 if CORS:
     CORS(app, resources={r"/api/*": {"origins": os.getenv("ALLOWED_ORIGIN", "*")}})
 _hits = defaultdict(deque)
+STARTED_AT = time.time()
 LAST_ERROR = {"time": None, "message": None}   # shown in /api/health so you can see why chat failed
 
 
@@ -453,7 +454,9 @@ def cars_page():
 def health():
     return jsonify({"ok": True, "model": ACTIVE_MODEL, "key_configured": bool(GEMINI_API_KEY),
                     "cars_total": len(CARS), "cars_available": len(available_cars()),
-                    "data_problems": validate_cars(), "last_chat_error": LAST_ERROR})
+                    "data_problems": validate_cars(), "last_chat_error": LAST_ERROR,
+                    "started_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(STARTED_AT)),
+                    "uptime_minutes": round((time.time() - STARTED_AT) / 60, 1)})
 
 
 @app.route("/api/cars")

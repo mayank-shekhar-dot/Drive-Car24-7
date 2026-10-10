@@ -133,6 +133,9 @@ MAX_CARS = 50
 MAX_MESSAGE_CHARS = 500
 MAX_HISTORY = 10
 MAX_OUTPUT_TOKENS = 4000          # FIX: was 700 (thinking tokens used it all up)
+# If the main model says "quota finished" (429) or "busy" (503), these models are tried next.
+FALLBACK_MODELS = [m.strip() for m in os.getenv(
+    "FALLBACK_MODELS", "gemini-3.1-flash-lite,gemini-3.5-flash-lite,gemini-3.6-flash").split(",") if m.strip()]
 RATE_LIMIT, RATE_WINDOW = 15, 60  # 15 messages per 60 seconds per IP
 VALID_TYPES = {"Used", "New"}
 VALID_FUELS = {"Petrol", "Diesel", "CNG", "Hybrid", "Electric"}
@@ -395,6 +398,17 @@ def ask_gemini(message, history=None):
             app.logger.warning("Model %s not found, switching to %s", ACTIVE_MODEL, alt)
             ACTIVE_MODEL = alt
             resp = _call_with_retry(alt)
+
+    # Quota finished (429) or Google busy (503): try the other models before giving up
+    if resp.status_code in (429, 503):
+        for alt in FALLBACK_MODELS:
+            if alt == ACTIVE_MODEL:
+                continue
+            app.logger.warning("Model %s returned %s, trying %s", ACTIVE_MODEL, resp.status_code, alt)
+            alt_resp = _call_with_retry(alt)
+            if alt_resp.status_code == 200:
+                resp = alt_resp
+                break
     resp.raise_for_status()
 
     reply = _extract_reply(resp.json())

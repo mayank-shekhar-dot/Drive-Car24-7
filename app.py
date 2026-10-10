@@ -6,8 +6,9 @@ SETUP
 
 CHECK LOCALLY (3 steps, do them in this order)
     1) python app.py check     -> validates your car list and prints exactly what the AI will know (no API key needed)
-    2) python app.py chat      -> chat with the AI in the terminal (needs GEMINI_API_KEY)
-    3) python app.py           -> starts the website at http://localhost:5000 with the floating AI button
+    2) python app.py test      -> tests your Gemini key and model, and explains any error in simple words
+    3) python app.py chat      -> chat with the AI in the terminal (needs GEMINI_API_KEY)
+    4) python app.py           -> starts the website at http://localhost:5000 with the floating AI button
 
     Set the key first:
       Windows PowerShell :  $env:GEMINI_API_KEY="your_key"
@@ -112,9 +113,11 @@ OFF_TOPIC_REPLY = (
 #  Settings
 # =====================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+# .strip() removes accidental spaces / quotes (a very common reason for "API key not valid")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip().strip("\"'").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+ACTIVE_MODEL = GEMINI_MODEL  # may switch automatically if Google retires the model above
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 MAX_CARS = 50
 MAX_MESSAGE_CHARS = 500
@@ -283,19 +286,59 @@ def _build_contents(history, message):
     return contents
 
 
+def _gemini_headers():
+    return {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
+
+
+def _pick_fallback_model():
+    """Ask Google which models this key can use and pick the newest 'flash' text model."""
+    resp = requests.get(f"{GEMINI_BASE}/models?pageSize=200", headers=_gemini_headers(), timeout=20)
+    resp.raise_for_status()
+    best, best_ver = None, -1.0
+    for m in resp.json().get("models", []):
+        name = m.get("name", "").split("/")[-1]
+        found = re.match(r"^gemini-(\d+(?:\.\d+)?)-flash$", name)
+        if found and "generateContent" in m.get("supportedGenerationMethods", []):
+            if float(found.group(1)) > best_ver:
+                best, best_ver = name, float(found.group(1))
+    return best
+
+
+def explain_error(exc):
+    """Turn a Gemini/network error into a short, plain explanation."""
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        code = exc.response.status_code
+        body = exc.response.text[:300].replace("\n", " ")
+        hints = {
+            400: "Google says the request or the API key is not valid. Check that the key is copied fully, with no spaces or quotes.",
+            401: "The API key was rejected. Create a fresh key in Google AI Studio and set it again.",
+            403: "The key is not allowed to use the Gemini API (restricted, blocked, or the API is not enabled for its project).",
+            404: "The model name was not found. Set GEMINI_MODEL to a current model, or let the app pick one automatically.",
+            429: "Too many requests or the free quota is finished. Wait a bit and try again.",
+        }
+        return f"HTTP {code}: {hints.get(code, 'Google returned an error.')}\nGoogle said: {body}"
+    return f"{type(exc).__name__}: {exc}  (check your internet connection)"
+
+
 def ask_gemini(message, history=None):
     """Returns the reply text. Raises on API/network problems."""
+    global ACTIVE_MODEL
     payload = {
         "system_instruction": {"parts": [{"text": build_system_prompt()}]},
         "contents": _build_contents(history, message),
         "generationConfig": {"temperature": 0.3, "maxOutputTokens": 700},
     }
-    resp = requests.post(
-        GEMINI_URL,
-        headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
-        json=payload,
-        timeout=30,
-    )
+    def _call(model):
+        return requests.post(f"{GEMINI_BASE}/models/{model}:generateContent",
+                             headers=_gemini_headers(), json=payload, timeout=30)
+
+    resp = _call(ACTIVE_MODEL)
+    if resp.status_code == 404:  # model name retired or unknown: try the newest flash model
+        alt = _pick_fallback_model()
+        if alt and alt != ACTIVE_MODEL:
+            app.logger.warning("Model %s not found, switching to %s", ACTIVE_MODEL, alt)
+            ACTIVE_MODEL = alt
+            resp = _call(alt)
     resp.raise_for_status()
     parts = resp.json()["candidates"][0]["content"]["parts"]
     reply = "".join(p.get("text", "") for p in parts).strip()
@@ -333,7 +376,7 @@ def cars_page():
 
 @app.route("/api/health")
 def health():
-    return jsonify({"ok": True, "model": GEMINI_MODEL, "key_configured": bool(GEMINI_API_KEY),
+    return jsonify({"ok": True, "model": ACTIVE_MODEL, "key_configured": bool(GEMINI_API_KEY),
                     "cars_total": len(CARS), "cars_available": len(available_cars()),
                     "data_problems": validate_cars()})
 
@@ -369,7 +412,7 @@ def chat():
     try:
         return jsonify({"reply": ask_gemini(message, data.get("history"))})
     except requests.HTTPError as exc:
-        app.logger.error("Gemini HTTP error: %s %s", exc.response.status_code, exc.response.text[:300])
+        app.logger.error("Gemini HTTP error: %s", explain_error(exc))
         return jsonify({"error": "AI service error. Please try again."}), 502
     except Exception as exc:
         app.logger.error("Chat error: %s", exc)
@@ -396,8 +439,27 @@ def run_check():
     print("=" * 60)
     print(inventory_text())
     print("\nAPI key set:", "YES" if GEMINI_API_KEY else "NO  (needed for 'chat' and the website)")
-    print("Model:", GEMINI_MODEL)
-    print("\nNext step:  python app.py chat")
+    print("Model:", ACTIVE_MODEL)
+    print("\nNext step:  python app.py test")
+
+
+def run_test():
+    print("Testing your Gemini setup...\n")
+    if not GEMINI_API_KEY:
+        print("RESULT: GEMINI_API_KEY is NOT set in this window.")
+        print("  Windows CMD : set GEMINI_API_KEY=your_key      (no quotes, no spaces)")
+        print("  PowerShell  : $env:GEMINI_API_KEY=\"your_key\"")
+        print("  Render      : Dashboard -> your service -> Environment -> add GEMINI_API_KEY")
+        return
+    print(f"Key found: starts with '{GEMINI_API_KEY[:3]}...', length {len(GEMINI_API_KEY)}")
+    print(f"Model    : {ACTIVE_MODEL}")
+    try:
+        reply = ask_gemini("Hello, which services do you offer?")
+        print(f"\nRESULT: WORKING. Model used: {ACTIVE_MODEL}")
+        print("AI said:", reply)
+    except Exception as exc:
+        print("\nRESULT: NOT WORKING")
+        print(explain_error(exc))
 
 
 def run_terminal_chat():
@@ -421,7 +483,7 @@ def run_terminal_chat():
         try:
             reply = ask_gemini(text[:MAX_MESSAGE_CHARS], history)
         except Exception as exc:
-            print("Error:", exc, "\n")
+            print("Error:", explain_error(exc), "\n")
             continue
         print("AI :", reply, "\n")
         history += [{"role": "user", "text": text}, {"role": "model", "text": reply}]
@@ -432,6 +494,8 @@ if __name__ == "__main__":
     command = sys.argv[1].lower() if len(sys.argv) > 1 else "run"
     if command == "check":
         run_check()
+    elif command == "test":
+        run_test()
     elif command == "chat":
         run_terminal_chat()
     else:

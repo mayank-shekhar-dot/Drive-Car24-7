@@ -290,31 +290,54 @@ def _gemini_headers():
     return {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
 
 
-def _pick_fallback_model():
-    """Ask Google which models this key can use and pick the newest 'flash' text model."""
+_models_cache = {"at": 0.0, "names": []}
+_cooldown = {}  # model name -> time until which we skip it (after 404 / 429)
+
+
+def _list_flash_models():
+    """Ask Google which flash / flash-lite text models this key can use. Newest first, cached for 10 minutes."""
+    now = time.time()
+    if _models_cache["names"] and now - _models_cache["at"] < 600:
+        return _models_cache["names"]
     resp = requests.get(f"{GEMINI_BASE}/models?pageSize=200", headers=_gemini_headers(), timeout=20)
     resp.raise_for_status()
-    best, best_ver = None, -1.0
+    found = []
     for m in resp.json().get("models", []):
         name = m.get("name", "").split("/")[-1]
-        found = re.match(r"^gemini-(\d+(?:\.\d+)?)-flash$", name)
-        if found and "generateContent" in m.get("supportedGenerationMethods", []):
-            if float(found.group(1)) > best_ver:
-                best, best_ver = name, float(found.group(1))
-    return best
+        mt = re.match(r"^gemini-(\d+(?:\.\d+)?)-flash(-lite)?$", name)
+        if mt and "generateContent" in m.get("supportedGenerationMethods", []):
+            found.append((-float(mt.group(1)), 1 if mt.group(2) else 0, name))
+    names = [n for _, _, n in sorted(found)]
+    _models_cache.update(at=now, names=names)
+    return names
+
+
+def _models_to_try():
+    """Main model first, then other flash models (a different model has its own free quota)."""
+    now = time.time()
+    order = [ACTIVE_MODEL]
+    try:
+        order += _list_flash_models()
+    except Exception as exc:  # listing is optional
+        app.logger.warning("Could not list models: %s", exc)
+    out = []
+    for m in order:
+        if m not in out and _cooldown.get(m, 0) <= now:
+            out.append(m)
+    return (out or [ACTIVE_MODEL])[:4]
 
 
 def explain_error(exc):
     """Turn a Gemini/network error into a short, plain explanation."""
     if isinstance(exc, requests.HTTPError) and exc.response is not None:
         code = exc.response.status_code
-        body = exc.response.text[:300].replace("\n", " ")
+        body = exc.response.text[:700].replace("\n", " ")
         hints = {
             400: "Google says the request or the API key is not valid. Check that the key is copied fully, with no spaces or quotes. If it mentions location or free tier, set the Render region to Singapore.",
             401: "The API key was rejected. Create a fresh key in Google AI Studio and set it again.",
             403: "The key is not allowed to use the Gemini API (restricted, blocked, or the API is not enabled for its project).",
             404: "The model name was not found. Set GEMINI_MODEL to a current model, or let the app pick one automatically.",
-            429: "Too many requests or the free quota is finished. Wait a bit and try again.",
+            429: "The free quota of this model is finished (per minute or per day). The app tries other models automatically; the daily quota resets at midnight Pacific time. Check usage at https://ai.dev/rate-limit",
         }
         return f"HTTP {code}: {hints.get(code, 'Google returned an error.')}\nGoogle said: {body}"
     if isinstance(exc, requests.Timeout):
@@ -323,8 +346,25 @@ def explain_error(exc):
     return f"{type(exc).__name__}: {exc}  (check your internet connection)"
 
 
+_answer_cache = {}  # first-question answers are reused for 10 minutes (saves free quota)
+
+
 def ask_gemini(message, history=None):
     """Returns the reply text. Raises on API/network problems."""
+    key = message.strip().lower()
+    if not history and len(key) <= 80:
+        hit = _answer_cache.get(key)
+        if hit and time.time() - hit[0] < 600:
+            return hit[1]
+    reply = _ask_gemini_uncached(message, history)
+    if not history and len(key) <= 80:
+        if len(_answer_cache) > 200:
+            _answer_cache.clear()
+        _answer_cache[key] = (time.time(), reply)
+    return reply
+
+
+def _ask_gemini_uncached(message, history=None):
     global ACTIVE_MODEL
     payload = {
         "system_instruction": {"parts": [{"text": build_system_prompt()}]},
@@ -347,13 +387,22 @@ def ask_gemini(message, history=None):
                               headers=_gemini_headers(), json=body, timeout=(10, 50))
         return r
 
-    resp = _call(ACTIVE_MODEL)
-    if resp.status_code == 404:  # model name retired or unknown: try the newest flash model
-        alt = _pick_fallback_model()
-        if alt and alt != ACTIVE_MODEL:
-            app.logger.warning("Model %s not found, switching to %s", ACTIVE_MODEL, alt)
-            ACTIVE_MODEL = alt
-            resp = _call(alt)
+    resp, active_gone = None, False
+    for model in _models_to_try():
+        resp = _call(model)
+        if resp.status_code == 429:      # this model's quota is finished: skip it for 15 minutes, try the next
+            _cooldown[model] = time.time() + 900
+            app.logger.warning("Model %s quota finished (429), trying another model", model)
+            continue
+        if resp.status_code == 404:      # model retired / not available for this key
+            _cooldown[model] = time.time() + 3600
+            active_gone = active_gone or model == ACTIVE_MODEL
+            app.logger.warning("Model %s not found (404), trying another model", model)
+            continue
+        if resp.ok and active_gone and model != ACTIVE_MODEL:  # only a retired model is replaced for good
+            app.logger.warning("Now using model %s instead of %s", model, ACTIVE_MODEL)
+            ACTIVE_MODEL = model
+        break
     resp.raise_for_status()
     data = resp.json()
     cand = (data.get("candidates") or [{}])[0]

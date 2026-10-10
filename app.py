@@ -147,6 +147,7 @@ app = Flask(__name__)
 if CORS:
     CORS(app, resources={r"/api/*": {"origins": os.getenv("ALLOWED_ORIGIN", "*")}})
 _hits = defaultdict(deque)
+LAST_ERROR = {"time": None, "message": None}   # shown in /api/health so you can see why chat failed
 
 
 # =====================================================================
@@ -452,7 +453,7 @@ def cars_page():
 def health():
     return jsonify({"ok": True, "model": ACTIVE_MODEL, "key_configured": bool(GEMINI_API_KEY),
                     "cars_total": len(CARS), "cars_available": len(available_cars()),
-                    "data_problems": validate_cars()})
+                    "data_problems": validate_cars(), "last_chat_error": LAST_ERROR})
 
 
 @app.route("/api/cars")
@@ -487,9 +488,11 @@ def chat():
         return jsonify({"reply": ask_gemini(message, data.get("history"))})
     except requests.HTTPError as exc:
         app.logger.error("Gemini HTTP error: %s", explain_error(exc))
+        LAST_ERROR.update(time=time.strftime("%Y-%m-%d %H:%M:%S"), message=explain_error(exc)[:500])
         return jsonify({"error": "AI service error. Please try again."}), 502
-    except Exception:
+    except Exception as exc:
         app.logger.error("Chat error:\n%s", traceback.format_exc())
+        LAST_ERROR.update(time=time.strftime("%Y-%m-%d %H:%M:%S"), message=explain_error(exc)[:500])
         return jsonify({"error": "Could not get a reply. Please try again."}), 502
 
 

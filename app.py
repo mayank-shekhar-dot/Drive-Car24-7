@@ -16,7 +16,7 @@ CHECK LOCALLY (3 steps, do them in this order)
     Free key: https://aistudio.google.com/apikey  (the key stays on the server, never in index.html)
 
 DEPLOY (Render etc.)
-    Start command : gunicorn app:app
+    Start command : gunicorn app:app --timeout 120
     Env variables : GEMINI_API_KEY (required), GEMINI_MODEL, ALLOWED_ORIGIN (optional)
 
 HOW TO EDIT CARS: scroll to the CARS list below. One block = one car. Up to 50 cars.
@@ -317,6 +317,9 @@ def explain_error(exc):
             429: "Too many requests or the free quota is finished. Wait a bit and try again.",
         }
         return f"HTTP {code}: {hints.get(code, 'Google returned an error.')}\nGoogle said: {body}"
+    if isinstance(exc, requests.Timeout):
+        return ("Timeout: Google took too long to answer. Try again; if it keeps happening the model is slow or busy. "
+                "On Render use the start command:  gunicorn app:app --timeout 120")
     return f"{type(exc).__name__}: {exc}  (check your internet connection)"
 
 
@@ -326,11 +329,23 @@ def ask_gemini(message, history=None):
     payload = {
         "system_instruction": {"parts": [{"text": build_system_prompt()}]},
         "contents": _build_contents(history, message),
-        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1024},
     }
+
     def _call(model):
-        return requests.post(f"{GEMINI_BASE}/models/{model}:generateContent",
-                             headers=_gemini_headers(), json=payload, timeout=30)
+        body = dict(payload)
+        cfg = dict(payload["generationConfig"])
+        if re.match(r"^gemini-[3-9]", model):
+            # Gemini 3.x "thinks" before answering (slow). A chat assistant does not need deep thinking.
+            cfg["thinkingConfig"] = {"thinkingLevel": "low"}
+        body["generationConfig"] = cfg
+        r = requests.post(f"{GEMINI_BASE}/models/{model}:generateContent",
+                          headers=_gemini_headers(), json=body, timeout=(10, 50))
+        if r.status_code == 400 and "thinkingConfig" in cfg:  # this model does not accept the thinking setting
+            body["generationConfig"] = payload["generationConfig"]
+            r = requests.post(f"{GEMINI_BASE}/models/{model}:generateContent",
+                              headers=_gemini_headers(), json=body, timeout=(10, 50))
+        return r
 
     resp = _call(ACTIVE_MODEL)
     if resp.status_code == 404:  # model name retired or unknown: try the newest flash model

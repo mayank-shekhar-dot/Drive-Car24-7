@@ -1,10 +1,10 @@
 """
-Drive Cars 24/7 - backend (Flask + Gemini API)   [FIXED VERSION]
+Drive Cars 24/7 - backend (Flask + Gemini API)
 
 SETUP
     pip install flask flask-cors requests gunicorn
 
-CHECK LOCALLY (do them in this order)
+CHECK LOCALLY (3 steps, do them in this order)
     1) python app.py check     -> validates your car list and prints exactly what the AI will know (no API key needed)
     2) python app.py test      -> tests your Gemini key and model, and explains any error in simple words
     3) python app.py chat      -> chat with the AI in the terminal (needs GEMINI_API_KEY)
@@ -12,7 +12,6 @@ CHECK LOCALLY (do them in this order)
 
     Set the key first:
       Windows PowerShell :  $env:GEMINI_API_KEY="your_key"
-      Windows CMD        :  set GEMINI_API_KEY=your_key
       Mac / Linux        :  export GEMINI_API_KEY="your_key"
     Free key: https://aistudio.google.com/apikey  (the key stays on the server, never in index.html)
 
@@ -22,20 +21,11 @@ DEPLOY (Render etc.)
 
 HOW TO EDIT CARS: scroll to the CARS list below. One block = one car. Up to 50 cars.
 After changing the list, restart the server (Ctrl+C, then python app.py).
-
-WHAT WAS FIXED
-    - maxOutputTokens raised 700 -> 2000 and Gemini 2.5 "thinking" switched off, so replies are no longer
-      cut off before any text is produced (this was the main reason the chat failed).
-    - Gemini response is now parsed safely (no more KeyError on a missing 'parts').
-    - Retry once on temporary Google errors (500/503).
-    - Real error details are now written to the log (with traceback).
-    - Friendly message if index.html / car.html / cars.html are missing.
 """
 import os
 import re
 import sys
 import time
-import traceback
 from collections import defaultdict, deque
 
 import requests
@@ -64,7 +54,7 @@ except ImportError:  # only needed if index.html is hosted on a different domain
 # featured      : True to show a "Featured" badge on the website (optional)
 # note          : optional extra info (owner, colour, etc.). Use "" if not needed.
 # image         : optional photo URL for the website card (if missing, a sample photo is used)
-# images        : optional list of photo URLs for the car page gallery
+# images        : optional list of photo URLs for the car page gallery, e.g. ["https://.../1.jpg", "https://.../2.jpg"]
 # owner         : optional, e.g. "1st", "2nd"            (car page)
 # reg_year      : optional registration year, e.g. 2021   (car page)
 # color         : optional, e.g. "White"                  (car page)
@@ -125,17 +115,13 @@ OFF_TOPIC_REPLY = (
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # .strip() removes accidental spaces / quotes (a very common reason for "API key not valid")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip().strip("\"'").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"  # set "auto" to pick the newest flash model
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()  # Google retired gemini-2.5-flash for new users
 ACTIVE_MODEL = GEMINI_MODEL  # may switch automatically if Google retires the model above
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 MAX_CARS = 50
 MAX_MESSAGE_CHARS = 500
 MAX_HISTORY = 10
-MAX_OUTPUT_TOKENS = 4000          # FIX: was 700 (thinking tokens used it all up)
-# If the main model says "quota finished" (429) or "busy" (503), these models are tried next.
-FALLBACK_MODELS = [m.strip() for m in os.getenv(
-    "FALLBACK_MODELS", "gemini-3.1-flash-lite,gemini-3.5-flash-lite,gemini-3.6-flash").split(",") if m.strip()]
 RATE_LIMIT, RATE_WINDOW = 15, 60  # 15 messages per 60 seconds per IP
 VALID_TYPES = {"Used", "New"}
 VALID_FUELS = {"Petrol", "Diesel", "CNG", "Hybrid", "Electric"}
@@ -147,8 +133,6 @@ app = Flask(__name__)
 if CORS:
     CORS(app, resources={r"/api/*": {"origins": os.getenv("ALLOWED_ORIGIN", "*")}})
 _hits = defaultdict(deque)
-STARTED_AT = time.time()
-LAST_ERROR = {"time": None, "message": None}   # shown in /api/health so you can see why chat failed
 
 
 # =====================================================================
@@ -326,94 +310,43 @@ def explain_error(exc):
         code = exc.response.status_code
         body = exc.response.text[:300].replace("\n", " ")
         hints = {
-            400: "Google says the request or the API key is not valid. Check that the key is copied fully, with no spaces or quotes.",
+            400: "Google says the request or the API key is not valid. Check that the key is copied fully, with no spaces or quotes. If it mentions location or free tier, set the Render region to Singapore.",
             401: "The API key was rejected. Create a fresh key in Google AI Studio and set it again.",
             403: "The key is not allowed to use the Gemini API (restricted, blocked, or the API is not enabled for its project).",
             404: "The model name was not found. Set GEMINI_MODEL to a current model, or let the app pick one automatically.",
             429: "Too many requests or the free quota is finished. Wait a bit and try again.",
-            503: "Google's servers are busy right now. Try again in a few seconds.",
         }
         return f"HTTP {code}: {hints.get(code, 'Google returned an error.')}\nGoogle said: {body}"
-    return f"{type(exc).__name__}: {exc}"
-
-
-def _extract_reply(data):
-    """FIX: safely read the text out of a Gemini response (never raises KeyError)."""
-    candidates = data.get("candidates") or []
-    if not candidates:
-        raise ValueError(f"Gemini returned no candidates. promptFeedback={data.get('promptFeedback')}")
-    cand = candidates[0]
-    parts = (cand.get("content") or {}).get("parts") or []
-    reply = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
-    if not reply:
-        raise ValueError(f"Gemini returned an empty reply. finishReason={cand.get('finishReason')}")
-    return reply
+    return f"{type(exc).__name__}: {exc}  (check your internet connection)"
 
 
 def ask_gemini(message, history=None):
     """Returns the reply text. Raises on API/network problems."""
     global ACTIVE_MODEL
-    system_text = build_system_prompt()
-    contents = _build_contents(history, message)
-
-    def _thinking_config(model):
-        # Gemini 2.5 uses thinkingBudget; Gemini 3.x uses thinkingLevel.
-        if model.startswith("gemini-2.5"):
-            return {"thinkingBudget": 0}
-        return {"thinkingLevel": "low"}
-
-    def _call(model, with_thinking=True):
-        config = {"temperature": 0.3, "maxOutputTokens": MAX_OUTPUT_TOKENS}
-        if with_thinking:
-            config["thinkingConfig"] = _thinking_config(model)
-        payload = {
-            "system_instruction": {"parts": [{"text": system_text}]},
-            "contents": contents,
-            "generationConfig": config,
-        }
+    payload = {
+        "system_instruction": {"parts": [{"text": build_system_prompt()}]},
+        "contents": _build_contents(history, message),
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
+    }
+    def _call(model):
         return requests.post(f"{GEMINI_BASE}/models/{model}:generateContent",
-                             headers=_gemini_headers(), json=payload, timeout=45)
+                             headers=_gemini_headers(), json=payload, timeout=30)
 
-    def _call_with_retry(model):
-        resp = _call(model)
-        # Model rejected our thinking setting: retry once without it.
-        if resp.status_code == 400 and "thinking" in resp.text.lower():
-            resp = _call(model, with_thinking=False)
-        # Temporary Google problem: wait a moment and retry once.
-        if resp.status_code in (500, 503):
-            time.sleep(1.5)
-            resp = _call(model, with_thinking=False)
-        return resp
-
-    # "auto" (or a retired model) -> ask Google which flash model this key can use
-    if ACTIVE_MODEL == "auto":
-        picked = _pick_fallback_model()
-        if not picked:
-            raise ValueError("Could not find any Gemini flash model for this key.")
-        ACTIVE_MODEL = picked
-        app.logger.info("Using Gemini model: %s", ACTIVE_MODEL)
-
-    resp = _call_with_retry(ACTIVE_MODEL)
-    if resp.status_code == 404:  # model retired: try the newest flash model
+    resp = _call(ACTIVE_MODEL)
+    if resp.status_code == 404:  # model name retired or unknown: try the newest flash model
         alt = _pick_fallback_model()
         if alt and alt != ACTIVE_MODEL:
             app.logger.warning("Model %s not found, switching to %s", ACTIVE_MODEL, alt)
             ACTIVE_MODEL = alt
-            resp = _call_with_retry(alt)
-
-    # Quota finished (429) or Google busy (503): try the other models before giving up
-    if resp.status_code in (429, 503):
-        for alt in FALLBACK_MODELS:
-            if alt == ACTIVE_MODEL:
-                continue
-            app.logger.warning("Model %s returned %s, trying %s", ACTIVE_MODEL, resp.status_code, alt)
-            alt_resp = _call_with_retry(alt)
-            if alt_resp.status_code == 200:
-                resp = alt_resp
-                break
+            resp = _call(alt)
     resp.raise_for_status()
-
-    reply = _extract_reply(resp.json())
+    data = resp.json()
+    cand = (data.get("candidates") or [{}])[0]
+    parts = (cand.get("content") or {}).get("parts") or []
+    reply = "".join(p.get("text", "") for p in parts).strip()
+    if not reply:
+        raise ValueError("Empty reply from Gemini (finishReason: %s, blockReason: %s)"
+                         % (cand.get("finishReason"), (data.get("promptFeedback") or {}).get("blockReason")))
     if reply.strip().strip(".!").upper() == OFF_TOPIC_TAG or reply.upper().startswith(OFF_TOPIC_TAG):
         return OFF_TOPIC_REPLY
     return reply
@@ -422,41 +355,33 @@ def ask_gemini(message, history=None):
 # =====================================================================
 #  Routes
 # =====================================================================
-def _serve(filename):
-    """Send an HTML file, or show a clear message if it is missing."""
-    path = os.path.join(BASE_DIR, filename)
-    if not os.path.exists(path):
-        return (f"<h3>{filename} not found</h3>"
-                f"<p>Put <b>{filename}</b> in the same folder as app.py:<br><code>{BASE_DIR}</code></p>"
-                f"<p>The API still works: <a href='/api/health'>/api/health</a></p>"), 404
-    return send_from_directory(BASE_DIR, filename)
-
-
 @app.route("/")
-@app.route("/index.html")
 def home():
-    return _serve("index.html")
+    return send_from_directory(BASE_DIR, "index.html")
+
+
+@app.route("/index.html")
+def home_html():
+    return send_from_directory(BASE_DIR, "index.html")
 
 
 @app.route("/car")
 @app.route("/car.html")
 def car_page():
-    return _serve("car.html")
+    return send_from_directory(BASE_DIR, "car.html")
 
 
 @app.route("/cars")
 @app.route("/cars.html")
 def cars_page():
-    return _serve("cars.html")
+    return send_from_directory(BASE_DIR, "cars.html")
 
 
 @app.route("/api/health")
 def health():
     return jsonify({"ok": True, "model": ACTIVE_MODEL, "key_configured": bool(GEMINI_API_KEY),
                     "cars_total": len(CARS), "cars_available": len(available_cars()),
-                    "data_problems": validate_cars(), "last_chat_error": LAST_ERROR,
-                    "started_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(STARTED_AT)),
-                    "uptime_minutes": round((time.time() - STARTED_AT) / 60, 1)})
+                    "data_problems": validate_cars()})
 
 
 @app.route("/api/cars")
@@ -476,10 +401,36 @@ def api_cars():
                     "business": {"name": BUSINESS["name"], "phones": BUSINESS["phones"], "whatsapp": BUSINESS["whatsapp"]}})
 
 
+@app.route("/api/ai-test")
+def ai_test():
+    """Open this link in the browser to see exactly why the AI works or not (no secrets are shown)."""
+    ip = (request.headers.get("X-Forwarded-For", request.remote_addr) or "unknown").split(",")[0].strip()
+    if _rate_limited(ip):
+        return jsonify({"working": False, "problem": "Too many tests. Wait a minute."}), 429
+    info = {"key_set": bool(GEMINI_API_KEY),
+            "key_starts_with": GEMINI_API_KEY[:3] if GEMINI_API_KEY else None,
+            "key_length": len(GEMINI_API_KEY), "model": ACTIVE_MODEL}
+    if not GEMINI_API_KEY:
+        info.update(working=False, problem="GEMINI_API_KEY is not set on this server. Add it in Render -> Environment and redeploy.")
+        return jsonify(info)
+    try:
+        info.update(working=True, model=None, reply=ask_gemini("Hello, which services do you offer?"))
+        info["model"] = ACTIVE_MODEL
+    except Exception as exc:
+        info.update(working=False, problem=explain_error(exc))
+    return jsonify(info)
+
+
+def _is_local():
+    """True only when the site is opened on your own computer (localhost)."""
+    return request.host.split(":")[0] in ("localhost", "127.0.0.1")
+
+
 @app.route("/api/chat", methods=["POST"])
 def chat():
     if not GEMINI_API_KEY:
-        return jsonify({"error": "Server is missing GEMINI_API_KEY."}), 500
+        return jsonify({"error": "Server is missing GEMINI_API_KEY.",
+                        "detail": "GEMINI_API_KEY is not set in the window where you started app.py. Set it and restart."}), 500
     ip = (request.headers.get("X-Forwarded-For", request.remote_addr) or "unknown").split(",")[0].strip()
     if _rate_limited(ip):
         return jsonify({"error": "Too many messages. Please wait a minute."}), 429
@@ -491,12 +442,16 @@ def chat():
         return jsonify({"reply": ask_gemini(message, data.get("history"))})
     except requests.HTTPError as exc:
         app.logger.error("Gemini HTTP error: %s", explain_error(exc))
-        LAST_ERROR.update(time=time.strftime("%Y-%m-%d %H:%M:%S"), message=explain_error(exc)[:500])
-        return jsonify({"error": "AI service error. Please try again."}), 502
+        out = {"error": "AI service error. Please try again."}
+        if _is_local() or request.args.get("debug") == "1":
+            out["detail"] = explain_error(exc)
+        return jsonify(out), 502
     except Exception as exc:
-        app.logger.error("Chat error:\n%s", traceback.format_exc())
-        LAST_ERROR.update(time=time.strftime("%Y-%m-%d %H:%M:%S"), message=explain_error(exc)[:500])
-        return jsonify({"error": "Could not get a reply. Please try again."}), 502
+        app.logger.error("Chat error: %s", explain_error(exc))
+        out = {"error": "Could not get a reply. Please try again."}
+        if _is_local() or request.args.get("debug") == "1":
+            out["detail"] = explain_error(exc)
+        return jsonify(out), 502
 
 
 # =====================================================================
@@ -520,9 +475,6 @@ def run_check():
     print(inventory_text())
     print("\nAPI key set:", "YES" if GEMINI_API_KEY else "NO  (needed for 'chat' and the website)")
     print("Model:", ACTIVE_MODEL)
-    print("\nHTML files in this folder:")
-    for f in ("index.html", "car.html", "cars.html"):
-        print(f"  {f}:", "found" if os.path.exists(os.path.join(BASE_DIR, f)) else "MISSING")
     print("\nNext step:  python app.py test")
 
 
@@ -532,7 +484,6 @@ def run_test():
         print("RESULT: GEMINI_API_KEY is NOT set in this window.")
         print("  Windows CMD : set GEMINI_API_KEY=your_key      (no quotes, no spaces)")
         print("  PowerShell  : $env:GEMINI_API_KEY=\"your_key\"")
-        print("  Mac / Linux : export GEMINI_API_KEY=\"your_key\"")
         print("  Render      : Dashboard -> your service -> Environment -> add GEMINI_API_KEY")
         return
     print(f"Key found: starts with '{GEMINI_API_KEY[:3]}...', length {len(GEMINI_API_KEY)}")

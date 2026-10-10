@@ -125,14 +125,14 @@ OFF_TOPIC_REPLY = (
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # .strip() removes accidental spaces / quotes (a very common reason for "API key not valid")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip().strip("\"'").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"  # set "auto" to pick the newest flash model
 ACTIVE_MODEL = GEMINI_MODEL  # may switch automatically if Google retires the model above
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 MAX_CARS = 50
 MAX_MESSAGE_CHARS = 500
 MAX_HISTORY = 10
-MAX_OUTPUT_TOKENS = 2000          # FIX: was 700 (thinking tokens used it all up)
+MAX_OUTPUT_TOKENS = 4000          # FIX: was 700 (thinking tokens used it all up)
 RATE_LIMIT, RATE_WINDOW = 15, 60  # 15 messages per 60 seconds per IP
 VALID_TYPES = {"Used", "New"}
 VALID_FUELS = {"Petrol", "Diesel", "CNG", "Hybrid", "Electric"}
@@ -351,33 +351,45 @@ def ask_gemini(message, history=None):
     system_text = build_system_prompt()
     contents = _build_contents(history, message)
 
+    def _thinking_config(model):
+        # Gemini 2.5 uses thinkingBudget; Gemini 3.x uses thinkingLevel.
+        if model.startswith("gemini-2.5"):
+            return {"thinkingBudget": 0}
+        return {"thinkingLevel": "low"}
+
     def _call(model, with_thinking=True):
         config = {"temperature": 0.3, "maxOutputTokens": MAX_OUTPUT_TOKENS}
         if with_thinking:
-            # FIX: Gemini 2.5 Flash "thinks" first and those tokens count toward maxOutputTokens.
-            # A short chat reply does not need thinking, so switch it off.
-            config["thinkingConfig"] = {"thinkingBudget": 0}
+            config["thinkingConfig"] = _thinking_config(model)
         payload = {
             "system_instruction": {"parts": [{"text": system_text}]},
             "contents": contents,
             "generationConfig": config,
         }
         return requests.post(f"{GEMINI_BASE}/models/{model}:generateContent",
-                             headers=_gemini_headers(), json=payload, timeout=30)
+                             headers=_gemini_headers(), json=payload, timeout=45)
 
     def _call_with_retry(model):
         resp = _call(model)
-        # Some models do not accept thinkingConfig: retry once without it.
+        # Model rejected our thinking setting: retry once without it.
         if resp.status_code == 400 and "thinking" in resp.text.lower():
             resp = _call(model, with_thinking=False)
         # Temporary Google problem: wait a moment and retry once.
         if resp.status_code in (500, 503):
             time.sleep(1.5)
-            resp = _call(model, with_thinking=False if "thinking" in resp.text.lower() else True)
+            resp = _call(model, with_thinking=False)
         return resp
 
+    # "auto" (or a retired model) -> ask Google which flash model this key can use
+    if ACTIVE_MODEL == "auto":
+        picked = _pick_fallback_model()
+        if not picked:
+            raise ValueError("Could not find any Gemini flash model for this key.")
+        ACTIVE_MODEL = picked
+        app.logger.info("Using Gemini model: %s", ACTIVE_MODEL)
+
     resp = _call_with_retry(ACTIVE_MODEL)
-    if resp.status_code == 404:  # model name retired or unknown: try the newest flash model
+    if resp.status_code == 404:  # model retired: try the newest flash model
         alt = _pick_fallback_model()
         if alt and alt != ACTIVE_MODEL:
             app.logger.warning("Model %s not found, switching to %s", ACTIVE_MODEL, alt)

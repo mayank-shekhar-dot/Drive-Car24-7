@@ -21,6 +21,12 @@ DEPLOY (Render etc.)
 
 HOW TO EDIT CARS: scroll to the CARS list below. One block = one car. Up to 50 cars.
 After changing the list, restart the server (Ctrl+C, then python app.py).
+
+CHANGES IN THIS VERSION
+    - 503 (Google busy), 500/502/504 and timeouts now move on to the next model (before, only 429/404 did).
+    - Total time per question is limited to 80 seconds so gunicorn (--timeout 120) never kills the worker.
+    - Default model is gemini-3.5-flash-lite (set GEMINI_MODEL to change it).
+    - /api/health now also shows started_at, uptime_minutes and last_chat_error.
 """
 import os
 import re
@@ -115,13 +121,14 @@ OFF_TOPIC_REPLY = (
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # .strip() removes accidental spaces / quotes (a very common reason for "API key not valid")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip().strip("\"'").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()  # Google retired gemini-2.5-flash for new users
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"
 ACTIVE_MODEL = GEMINI_MODEL  # may switch automatically if Google retires the model above
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 MAX_CARS = 50
 MAX_MESSAGE_CHARS = 500
 MAX_HISTORY = 10
+TOTAL_TIME_BUDGET = 80            # seconds for ONE question (all models together); keep below gunicorn --timeout
 RATE_LIMIT, RATE_WINDOW = 15, 60  # 15 messages per 60 seconds per IP
 VALID_TYPES = {"Used", "New"}
 VALID_FUELS = {"Petrol", "Diesel", "CNG", "Hybrid", "Electric"}
@@ -133,6 +140,8 @@ app = Flask(__name__)
 if CORS:
     CORS(app, resources={r"/api/*": {"origins": os.getenv("ALLOWED_ORIGIN", "*")}})
 _hits = defaultdict(deque)
+STARTED_AT = time.time()
+LAST_ERROR = {"time": None, "message": None}   # shown in /api/health so you can see why chat failed
 
 
 # =====================================================================
@@ -291,7 +300,7 @@ def _gemini_headers():
 
 
 _models_cache = {"at": 0.0, "names": []}
-_cooldown = {}  # model name -> time until which we skip it (after 404 / 429)
+_cooldown = {}  # model name -> time until which we skip it (after 404 / 429 / 5xx)
 
 
 def _list_flash_models():
@@ -338,6 +347,7 @@ def explain_error(exc):
             403: "The key is not allowed to use the Gemini API (restricted, blocked, or the API is not enabled for its project).",
             404: "The model name was not found. Set GEMINI_MODEL to a current model, or let the app pick one automatically.",
             429: "The free quota of this model is finished (per minute or per day). The app tries other models automatically; the daily quota resets at midnight Pacific time. Check usage at https://ai.dev/rate-limit",
+            503: "Google's servers are busy (high demand). The app tries other models automatically; this usually passes in a few minutes.",
         }
         return f"HTTP {code}: {hints.get(code, 'Google returned an error.')}\nGoogle said: {body}"
     if isinstance(exc, requests.Timeout):
@@ -387,22 +397,38 @@ def _ask_gemini_uncached(message, history=None):
                               headers=_gemini_headers(), json=body, timeout=(10, 50))
         return r
 
-    resp, active_gone = None, False
+    resp, active_gone, last_exc = None, False, None
+    started = time.time()
     for model in _models_to_try():
-        resp = _call(model)
-        if resp.status_code == 429:      # this model's quota is finished: skip it for 15 minutes, try the next
+        if time.time() - started > TOTAL_TIME_BUDGET:   # stay below gunicorn's --timeout
+            app.logger.warning("Time budget used up, giving up")
+            break
+        try:
+            r = _call(model)
+        except (requests.Timeout, requests.ConnectionError) as exc:   # this model is too slow: try the next one
+            last_exc = exc
+            app.logger.warning("Model %s: %s, trying another model", model, type(exc).__name__)
+            continue
+        resp = r
+        if r.status_code == 429:         # this model's quota is finished: skip it for 15 minutes, try the next
             _cooldown[model] = time.time() + 900
             app.logger.warning("Model %s quota finished (429), trying another model", model)
             continue
-        if resp.status_code == 404:      # model retired / not available for this key
+        if r.status_code == 404:         # model retired / not available for this key
             _cooldown[model] = time.time() + 3600
             active_gone = active_gone or model == ACTIVE_MODEL
             app.logger.warning("Model %s not found (404), trying another model", model)
             continue
-        if resp.ok and active_gone and model != ACTIVE_MODEL:  # only a retired model is replaced for good
+        if r.status_code in (500, 502, 503, 504):   # Google busy / temporary: skip this model for 1 minute
+            _cooldown[model] = time.time() + 60
+            app.logger.warning("Model %s busy (%s), trying another model", model, r.status_code)
+            continue
+        if r.ok and active_gone and model != ACTIVE_MODEL:  # only a retired model is replaced for good
             app.logger.warning("Now using model %s instead of %s", model, ACTIVE_MODEL)
             ACTIVE_MODEL = model
         break
+    if resp is None:
+        raise last_exc or RuntimeError("No Gemini model could be reached")
     resp.raise_for_status()
     data = resp.json()
     cand = (data.get("candidates") or [{}])[0]
@@ -445,7 +471,9 @@ def cars_page():
 def health():
     return jsonify({"ok": True, "model": ACTIVE_MODEL, "key_configured": bool(GEMINI_API_KEY),
                     "cars_total": len(CARS), "cars_available": len(available_cars()),
-                    "data_problems": validate_cars()})
+                    "data_problems": validate_cars(), "last_chat_error": LAST_ERROR,
+                    "started_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(STARTED_AT)),
+                    "uptime_minutes": round((time.time() - STARTED_AT) / 60, 1)})
 
 
 @app.route("/api/cars")
@@ -506,12 +534,14 @@ def chat():
         return jsonify({"reply": ask_gemini(message, data.get("history"))})
     except requests.HTTPError as exc:
         app.logger.error("Gemini HTTP error: %s", explain_error(exc))
+        LAST_ERROR.update(time=time.strftime("%Y-%m-%d %H:%M:%S"), message=explain_error(exc)[:500])
         out = {"error": "AI service error. Please try again."}
         if _is_local() or request.args.get("debug") == "1":
             out["detail"] = explain_error(exc)
         return jsonify(out), 502
     except Exception as exc:
         app.logger.error("Chat error: %s", explain_error(exc))
+        LAST_ERROR.update(time=time.strftime("%Y-%m-%d %H:%M:%S"), message=explain_error(exc)[:500])
         out = {"error": "Could not get a reply. Please try again."}
         if _is_local() or request.args.get("debug") == "1":
             out["detail"] = explain_error(exc)

@@ -106,16 +106,19 @@ dialog{width:min(900px,calc(100% - 28px));max-height:min(88vh,850px);padding:0;b
   const photo=(id,w)=>'https://images.unsplash.com/'+id+'?auto=format&fit=crop&w='+(w||900)+'&q=84';
   const galleryFor=(seed)=>[0,1,2,3].map((n)=>photo(imageIds[(seed+n*3)%imageIds.length],900));
   const usedCars=[
-    {name:'BMW 5 Series',year:2021,fuel:'Petrol',transmission:'Automatic',registration:'BR',price:3850000,description:'A refined executive sedan with a premium cabin and composed road manners.',seed:0},
-    {name:'Toyota Fortuner',year:2022,fuel:'Diesel',transmission:'Automatic',registration:'BR',price:4250000,description:'A spacious SUV profile suited to long drives and everyday practicality.',seed:1},
-    {name:'Mercedes-Benz C-Class',year:2020,fuel:'Petrol',transmission:'Automatic',registration:'UP',price:3290000,description:'Comfort-focused luxury with an elegant design and well-appointed interior.',seed:2},
-    {name:'Audi Q3',year:2022,fuel:'Petrol',transmission:'Automatic',registration:'DL',price:3480000,description:'A compact premium SUV with a versatile cabin and confident stance.',seed:3},
-    {name:'Mahindra XUV700',year:2023,fuel:'Diesel',transmission:'Manual',registration:'JH',price:1890000,description:'A feature-rich family SUV with generous space for daily journeys.',seed:4},
-    {name:'Tata Nexon',year:2022,fuel:'Petrol',transmission:'Automatic',registration:'BR',price:975000,description:'A compact SUV with a practical footprint and modern styling.',seed:5},
-    {name:'Hyundai Creta',year:2021,fuel:'Diesel',transmission:'Manual',registration:'WB',price:1425000,description:'A popular everyday SUV with a comfortable and flexible cabin.',seed:6},
-    {name:'Kia Seltos',year:2023,fuel:'Petrol',transmission:'Automatic',registration:'MH',price:1690000,description:'Contemporary design and useful cabin technology in a compact SUV.',seed:7},
-    {name:'Volkswagen Taigun',year:2022,fuel:'Petrol',transmission:'Manual',registration:'UP',price:1190000,description:'A compact crossover with a clean design and engaging drive character.',seed:8},
-    {name:'MG Hector',year:2021,fuel:'Petrol',transmission:'Automatic',registration:'BR',price:1575000,description:'A roomy SUV with a bold road presence and family-friendly space.',seed:9}
+    {name:'Hyundai Grand i10 Asta',year:2014,fuel:'Petrol',transmission:'Manual',registration:'BR',price:235000,description:'4th owner, 80,000 km driven.',seed:0},
+    {name:'Hyundai Verna SX (O)',year:2018,fuel:'Petrol',transmission:'Manual',registration:'BR',price:770000,description:'2nd owner, 37,000 km driven.',seed:1},
+    {name:'Maruti Suzuki Baleno Delta',year:2017,fuel:'Petrol',transmission:'Manual',registration:'BR',price:380000,description:'3rd owner, 43,000 km driven.',seed:2},
+    {name:'Hyundai i20 Sportz',year:2015,fuel:'Petrol',transmission:'Manual',registration:'BR',price:309000,description:'3rd owner, 60,000 km driven.',seed:3},
+    {name:'Maruti Suzuki Swift ZDI',year:2016,fuel:'Diesel',transmission:'Manual',registration:'BR',price:340000,description:'2nd owner, 1,30,000 km driven.',seed:4},
+    {name:'Maruti Suzuki Swift Dzire',year:2013,fuel:'Petrol',transmission:'Manual',registration:'BR',price:245000,description:'1st owner, 1,30,000 km driven.',seed:5},
+    {name:'Hyundai Creta EX Petrol',year:2023,fuel:'Petrol',transmission:'Manual',registration:'BR',price:880000,description:'1st owner, 43,000 km driven.',seed:6},
+    {name:'Maruti Suzuki Wagon R LXI',year:2016,fuel:'Petrol',transmission:'Manual',registration:'BR',price:255000,description:'50,000 km driven.',seed:7},
+    {name:'Maruti Suzuki Wagon R',year:2012,fuel:'Petrol',transmission:'Manual',registration:'BR',price:170000,description:'1,02,000 km driven.',seed:8},
+    {name:'Maruti Suzuki Alto 800 LXI',year:2017,fuel:'Petrol',transmission:'Manual',registration:'BR',price:185000,description:'71,000 km driven.',seed:9},
+    {name:'Maruti Suzuki Alto 800 VXI',year:2013,fuel:'Petrol',transmission:'Manual',registration:'BR',price:155000,description:'3rd owner, 1,27,000 km driven.',seed:10},
+    {name:'Maruti Suzuki Alto 800 VXI',year:2013,fuel:'Petrol',transmission:'Manual',registration:'BR',price:145000,description:'2nd owner, 69,000 km driven.',seed:11},
+    {name:'Hyundai Santro Magna',year:2021,fuel:'Petrol',transmission:'Manual',registration:'BR',price:375000,description:'1st owner, 69,000 km driven.',seed:12}
   ].map(c=>({...c,images:galleryFor(c.seed)}));
   const newCars=[
     {name:'Tata Curvv',year:2026,fuel:'Petrol',transmission:'Automatic',registration:'BR',price:1799000,description:'A new-model demonstration listing. Confirm variant and on-road price with the dealership.',seed:10},
